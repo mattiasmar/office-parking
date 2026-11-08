@@ -1,0 +1,76 @@
+# Keeps the Streamlit app and the Supabase database awake.
+# Runs every 4 hours (so the app never hits Streamlit's 12-hour sleep limit)
+# and can also be started by hand from the repo's Actions tab.
+name: Keep app awake
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"   # times are UTC; minute 17 avoids GitHub's busy top-of-hour
+  workflow_dispatch:
+
+env:
+  APP_URL: https://litebc-office-parking.streamlit.app
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: $SUPABASE_KEY" \
+            "$SUPABASE_URL/rest/v1/parkings?select=day&limit=1")
+          echo "Supabase answered HTTP $code"
+          test "$code" = "200"
+
+      - name: Install headless browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Open the app (and wake it if asleep)
+        shell: python
+        run: |
+          import os, sys, time
+          from playwright.sync_api import sync_playwright
+
+          url = os.environ["APP_URL"]
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto(url, timeout=90_000)
+              page.wait_for_timeout(5_000)
+
+              wake = page.get_by_role("button", name="Yes, get this app back up")
+              if wake.count():
+                  print("App was asleep. Waking it up.")
+                  wake.first.click()
+
+              deadline = time.time() + 240
+              while time.time() < deadline:
+                  for frame in page.frames:
+                      try:
+                          if frame.get_by_text("Office parking").count():
+                              print("App is up and running.")
+                              browser.close()
+                              sys.exit(0)
+                      except Exception:
+                          pass
+                  page.wait_for_timeout(5_000)
+
+              page.screenshot(path="wake-failure.png", full_page=True)
+              print("App did not load in time. See the wake-failure screenshot.")
+              browser.close()
+              sys.exit(1)
+
+      - name: Save screenshot if something went wrong
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-failure
+          path: wake-failure.png
+          if-no-files-found: ignore
