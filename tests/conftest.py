@@ -10,8 +10,6 @@ The app runs under Streamlit's AppTest with the database and the phone's
 location faked (see support.py), so no Supabase project or browser is needed.
 """
 
-import datetime as dt
-
 import pytest
 import requests
 import streamlit as st
@@ -38,11 +36,27 @@ def phone(monkeypatch):
     return fake
 
 
+def app_source_frozen_at(utc_iso):
+    """The app's source with its clock stopped at utc_iso."""
+    source = APP_FILE.read_text()
+    assert "from datetime import datetime\n" in source
+    return source.replace("from datetime import datetime\n", (
+        "from datetime import datetime as _datetime\n\n\n"
+        "class datetime(_datetime):\n"
+        "    @classmethod\n"
+        "    def now(cls, tz=None):\n"
+        f"        return _datetime.fromisoformat({utc_iso!r}).astimezone(tz)\n"), 1)
+
+
 @pytest.fixture
 def open_app(db, phone):
-    """Opens the app like a phone would: open_app("Avi") is Avi's bookmarked link."""
-    def open_app(user=None, *, secrets=True, employees=None):
-        at = AppTest.from_file(str(APP_FILE), default_timeout=30)
+    """Opens the app like a phone would: open_app("Avi") is Avi's bookmarked link.
+    now="2026-07-15T21:01:00+00:00" stops the app's clock at that instant."""
+    def open_app(user=None, *, secrets=True, employees=None, now=None):
+        if now is None:
+            at = AppTest.from_file(str(APP_FILE), default_timeout=30)
+        else:
+            at = AppTest.from_string(app_source_frozen_at(now), default_timeout=30)
         if secrets:
             at.secrets["supabase_url"] = "https://example.supabase.co"
             at.secrets["supabase_key"] = "test-key"
@@ -54,24 +68,3 @@ def open_app(db, phone):
         assert not at.exception, at.exception
         return at
     return open_app
-
-
-@pytest.fixture
-def freeze_clock(monkeypatch):
-    """freeze_clock("2026-07-15T21:01:00+00:00") stops the app's clock at that instant."""
-    real = dt.datetime
-
-    class AnyDatetime(type):
-        def __instancecheck__(cls, obj):
-            return isinstance(obj, real)
-
-    def freeze(utc_iso):
-        instant = real.fromisoformat(utc_iso)
-
-        class FrozenDatetime(real, metaclass=AnyDatetime):
-            @classmethod
-            def now(cls, tz=None):
-                return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
-
-        monkeypatch.setattr(dt, "datetime", FrozenDatetime)
-    return freeze
