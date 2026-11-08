@@ -3,22 +3,30 @@ Office parking tracker for Streamlit Community Cloud.
 
 - 4 spots, first come first served.
 - An employee taps "I've parked"; everyone sees the spots left.
+- "I've parked" only works at the office: the phone's location must be within
+  100 m of HaMelakha 4, Yokneam Illit.
 - A spot stays taken until the end of the day (local time) unless its owner taps "Undo".
 - The board refreshes itself every few seconds, so phones stay up to date.
 - Data lives in Supabase (Postgres), so it survives app restarts and sleep.
   Run supabase_setup.sql once in the Supabase SQL editor before first use.
 """
 
-from datetime import datetime, timedelta
+import math
+from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------- settings ---
 TOTAL_SPOTS = 4
 TIMEZONE = ZoneInfo("Asia/Jerusalem")   # the "day" resets at local midnight
 REFRESH_EVERY = "10s"                   # how often the board updates itself
+
+OFFICE = (32.66151, 35.10618)           # HaMelakha 4, Yokneam Illit (lat, lon)
+OFFICE_RADIUS_M = 100                   # parking can be marked only this close to it
 
 DEFAULT_EMPLOYEES = ["Avi", "Dana", "Eitan", "Maya", "Noa", "Yossi"]
 
@@ -69,11 +77,11 @@ def today() -> str:
 
 
 @st.cache_data(ttl=5, show_spinner=False)
-def todays_parkings(day: str) -> list[tuple[str, str]]:
+def todays_parkings(day: str) -> list[str]:
     rows = _call("GET", "parkings", params={
-        "select": "employee,parked_at", "day": f"eq.{day}", "order": "parked_at",
+        "select": "employee", "day": f"eq.{day}", "order": "parked_at",
     })
-    return [(r["employee"], r["parked_at"]) for r in rows]
+    return [r["employee"] for r in rows]
 
 
 def park(name: str) -> str:
@@ -91,14 +99,20 @@ def undo(name: str) -> None:
     todays_parkings.clear()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def history(days: int = 14) -> list[tuple[str, int]]:
-    since = (now().date() - timedelta(days=days - 1)).isoformat()
-    rows = _call("GET", "parkings", params={"select": "day", "day": f"gte.{since}"})
-    counts: dict[str, int] = {}
-    for r in rows:
-        counts[r["day"]] = counts.get(r["day"], 0) + 1
-    return sorted(counts.items(), reverse=True)
+# --------------------------------------------------------------- location ---
+# Tapping "I've parked" asks the phone where it is (geolocation/index.html);
+# the car is marked parked only if the answer is within OFFICE_RADIUS_M.
+
+get_location = components.declare_component(
+    "geolocation", path=str(Path(__file__).parent / "geolocation"))
+
+
+def metres_from_office(lat: float, lon: float) -> float:
+    """Great-circle (haversine) distance from OFFICE."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (*OFFICE, lat, lon))
+    a = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 2 * 6_371_000 * math.asin(math.sqrt(a))
 
 
 # --------------------------------------------------------------------- UI ---
@@ -178,6 +192,30 @@ def do_park():
     }[result]
 
 
+def start_park():
+    # The board now asks the phone where it is (park_if_at_office). A new key
+    # per tap makes the phone take a fresh reading each time.
+    st.session_state.tries = st.session_state.get("tries", 0) + 1
+    st.session_state.locating = f"location-{st.session_state.tries}"
+
+
+def park_if_at_office():
+    loc = get_location(key=st.session_state.locating, default=None)
+    if loc is None:
+        return                  # no answer yet; it reruns the board when it comes
+    st.session_state.locating = None
+    if "error" in loc:
+        st.session_state.msg = ("error", f"Couldn't get your location ({loc['error']}). "
+                                "Allow location access for this site and tap again.")
+        return
+    d = metres_from_office(loc["lat"], loc["lon"])
+    if d > OFFICE_RADIUS_M:
+        st.session_state.msg = ("error", f"You're {d:,.0f} m from the office (±{loc['accuracy']:.0f} m). "
+                                f"You can mark your car as parked only within {OFFICE_RADIUS_M} m of it.")
+        return
+    do_park()
+
+
 def do_undo():
     try:
         undo(st.session_state.user)
@@ -190,13 +228,14 @@ def do_undo():
 @st.fragment(run_every=REFRESH_EVERY)
 def board():
     user = st.session_state.get("user")
+    if st.session_state.get("locating"):
+        park_if_at_office()
     try:
-        rows = todays_parkings(today())
+        names = todays_parkings(today())
     except Exception:
         st.error(SETUP_HELP)
         return
-    names = [r[0] for r in rows]
-    free = TOTAL_SPOTS - len(rows)
+    free = TOTAL_SPOTS - len(names)
 
     if free == 0:
         status = "<b>0</b><span>spots free. The lot is full.</span>"
@@ -206,13 +245,12 @@ def board():
 
     bays = []
     for i in range(TOTAL_SPOTS):
-        if i < len(rows):
-            name, parked_at = rows[i]
-            t = datetime.fromisoformat(parked_at).astimezone(TIMEZONE).strftime("%H:%M")
+        if i < len(names):
+            name = names[i]
             cls = "bay mine" if name == user else "bay"
             bays.append(
                 f'<div class="{cls}"><div class="num">{i + 1}</div>'
-                f'<div class="who">{name}</div><div class="when">since {t}</div></div>'
+                f'<div class="who">{name}</div><div class="when">&nbsp;</div></div>'
             )
         else:
             bays.append(
@@ -227,8 +265,10 @@ def board():
     elif user in names:
         st.button("Undo, free my spot", on_click=do_undo,
                   width="stretch")
+    elif st.session_state.get("locating"):
+        st.button("Checking your location…", disabled=True, width="stretch")
     elif free > 0:
-        st.button("I've parked", on_click=do_park, type="primary",
+        st.button("I've parked", on_click=start_park, type="primary",
                   width="stretch")
     else:
         st.button("Lot full", disabled=True, width="stretch")
@@ -241,16 +281,3 @@ def board():
 
 
 board()
-
-with st.expander("Recent days"):
-    try:
-        past = history()
-    except Exception:
-        past = []
-    if past:
-        st.dataframe(
-            [{"Day": d, "Cars parked": n} for d, n in past],
-            hide_index=True, width="stretch",
-        )
-    else:
-        st.write("No parking recorded yet.")

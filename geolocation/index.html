@@ -1,0 +1,32 @@
+<!doctype html>
+<!--
+  Streamlit component used by streamlit_app.py. Draws nothing: once per mount it
+  asks the browser for a fresh location and sends it to Python as
+  {lat, lon, accuracy}, or {error} if the phone can't or won't say.
+-->
+<script>
+  function send(type, data) {
+    window.parent.postMessage({isStreamlitMessage: true, type: type, ...data}, "*");
+  }
+
+  function reply(value) {
+    send("streamlit:setComponentValue", {value: value, dataType: "json"});
+  }
+
+  window.addEventListener("message", function onRender(event) {
+    if (event.data.type !== "streamlit:render") return;
+    window.removeEventListener("message", onRender);
+    if (!navigator.geolocation) {
+      reply({error: "this browser can't share its location"});
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (p) => reply({lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy}),
+      (e) => reply({error: e.message || "location unavailable"}),
+      {enableHighAccuracy: true, timeout: 20000, maximumAge: 0},
+    );
+  });
+
+  send("streamlit:componentReady", {apiVersion: 1});
+  send("streamlit:setFrameHeight", {height: 0});
+</script>
