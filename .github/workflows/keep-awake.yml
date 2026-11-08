@@ -1,18 +1,43 @@
-# Keeps the Streamlit app and the Supabase database awake.
+# Keeps the Streamlit app and the Supabase database awake, and runs the tests.
 # Runs every 12 hours (at 07:00 and 19:00 UTC)
 # and can also be started by hand from the repo's Actions tab.
+# The tests (tests/) also run on every pull request and push to main;
+# those runs don't wake the app.
 name: Keep app awake
 
 on:
   schedule:
     - cron: "17 7,19 * * *"   # times are UTC; minute 17 avoids GitHub's busy top-of-hour
   workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
 
 env:
   APP_URL: https://litebc-office-parking.streamlit.app
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the app and the test tools
+        run: pip install -r requirements.txt pytest pyyaml
+
+      - name: Run the app tests
+        run: pytest tests
+
+      - name: Run the location component tests
+        run: node --test tests/geolocation.test.js
+
   wake:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
