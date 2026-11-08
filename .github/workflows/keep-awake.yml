@@ -1,11 +1,11 @@
 # Keeps the Streamlit app and the Supabase database awake.
-# Runs every 4 hours (so the app never hits Streamlit's 12-hour sleep limit)
+# Runs every 12 hours (at 07:00 and 19:00 UTC)
 # and can also be started by hand from the repo's Actions tab.
 name: Keep app awake
 
 on:
   schedule:
-    - cron: "17 */4 * * *"   # times are UTC; minute 17 avoids GitHub's busy top-of-hour
+    - cron: "17 7,19 * * *"   # times are UTC; minute 17 avoids GitHub's busy top-of-hour
   workflow_dispatch:
 
 env:
