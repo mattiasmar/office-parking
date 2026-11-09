@@ -7,18 +7,22 @@ Office parking tracker for Streamlit Community Cloud.
   100 m of HaMelakha 4, Yokneam Illit.
 - A spot stays taken until the end of the day (local time) unless its owner taps "Undo".
 - The board refreshes itself every few seconds, so phones stay up to date.
+- The staff list is kept by the manager at /mngr (pages/mngr.py).
 - Data lives in Supabase (Postgres), so it survives app restarts and sleep.
-  Run supabase_setup.sql once in the Supabase SQL editor before first use.
+  Run supabase_setup.sql and supabase_employees.sql once in the Supabase SQL
+  editor before first use.
 """
 
+import html
 import math
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+from store import call, load_staff
 
 # ---------------------------------------------------------------- settings ---
 TOTAL_SPOTS = 4
@@ -28,44 +32,10 @@ REFRESH_EVERY = "10s"                   # how often the board updates itself
 OFFICE = (32.66151, 35.10618)           # HaMelakha 4, Yokneam Illit (lat, lon)
 OFFICE_RADIUS_M = 100                   # parking can be marked only this close to it
 
-DEFAULT_EMPLOYEES = ["Avi", "Dana", "Eitan", "Maya", "Noa", "Yossi"]
-
-
-def load_employees() -> list[str]:
-    """Names come from Streamlit secrets if set, else the default list."""
-    try:
-        names = st.secrets.get("employees")
-        if names:
-            return list(names)
-    except Exception:
-        pass
-    return DEFAULT_EMPLOYEES
-
-
-EMPLOYEES = load_employees()
-
 # ---------------------------------------------------------------- storage ---
-# Talks to Supabase's REST API. The "park" database function locks the day,
-# counts the cars and inserts in one step, so two people can never grab the
-# last spot at the same moment.
-
-
-@st.cache_resource
-def get_api() -> tuple[str, requests.Session]:
-    base = st.secrets["supabase_url"].rstrip("/") + "/rest/v1"
-    key = st.secrets["supabase_key"]
-    s = requests.Session()
-    s.headers["apikey"] = key
-    if not key.startswith("sb_"):               # legacy service_role JWT key
-        s.headers["Authorization"] = f"Bearer {key}"
-    return base, s
-
-
-def _call(method: str, path: str, **kwargs):
-    base, s = get_api()
-    r = s.request(method, f"{base}/{path}", timeout=10, **kwargs)
-    r.raise_for_status()
-    return r.json() if r.content else None
+# Talks to Supabase's REST API (store.py). The "park" database function locks
+# the day, counts the cars and inserts in one step, so two people can never
+# grab the last spot at the same moment.
 
 
 def now() -> datetime:
@@ -78,14 +48,14 @@ def today() -> str:
 
 @st.cache_data(ttl=5, show_spinner=False)
 def todays_parkings(day: str) -> list[str]:
-    rows = _call("GET", "parkings", params={
+    rows = call("GET", "parkings", params={
         "select": "employee", "day": f"eq.{day}", "order": "parked_at",
     })
     return [r["employee"] for r in rows]
 
 
 def park(name: str) -> str:
-    result = _call("POST", "rpc/park", json={
+    result = call("POST", "rpc/park", json={
         "p_employee": name, "p_day": today(), "p_spots": TOTAL_SPOTS,
     })
     todays_parkings.clear()
@@ -93,7 +63,7 @@ def park(name: str) -> str:
 
 
 def undo(name: str) -> None:
-    _call("DELETE", "parkings", params={
+    call("DELETE", "parkings", params={
         "day": f"eq.{today()}", "employee": f"eq.{name}",
     })
     todays_parkings.clear()
@@ -151,6 +121,17 @@ st.markdown(
 
 st.title("🅿️ Office parking")
 
+SETUP_HELP = ("Can't reach the parking database. Check that supabase_url and supabase_key "
+              "are set in the app's Secrets and that supabase_setup.sql and "
+              "supabase_employees.sql were run in Supabase.")
+
+# ---- the staff list, kept by the manager at /mngr. Only names are used here.
+try:
+    EMPLOYEES = [person["name"] for person in load_staff()]
+except Exception:
+    st.error(SETUP_HELP)
+    st.stop()
+
 # ---- who am I? Remembered in the URL so each phone can bookmark its own link.
 if "user" not in st.session_state:
     from_url = st.query_params.get("user")
@@ -175,10 +156,6 @@ if st.session_state.user:
 
 
 # ---- button callbacks (run before the board redraws)
-SETUP_HELP = ("Can't reach the parking database. Check that supabase_url and supabase_key "
-              "are set in the app's Secrets and that supabase_setup.sql was run in Supabase.")
-
-
 def do_park():
     try:
         result = park(st.session_state.user)
@@ -250,7 +227,7 @@ def board():
             cls = "bay mine" if name == user else "bay"
             bays.append(
                 f'<div class="{cls}"><div class="num">{i + 1}</div>'
-                f'<div class="who">{name}</div><div class="when">&nbsp;</div></div>'
+                f'<div class="who">{html.escape(name)}</div><div class="when">&nbsp;</div></div>'
             )
         else:
             bays.append(

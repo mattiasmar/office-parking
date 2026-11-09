@@ -10,13 +10,26 @@ The app runs under Streamlit's AppTest with the database and the phone's
 location faked (see support.py), so no Supabase project or browser is needed.
 """
 
+import sys
+
 import pytest
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit.runtime.pages_manager import PagesManager
 from streamlit.testing.v1 import AppTest
 
-from support import APP_FILE, FakePhone, FakeSupabase
+from support import APP_FILE, MANAGER_PASSWORD, ROOT, FakePhone, FakeSupabase, button
+
+sys.path.insert(0, str(ROOT))           # so the app finds store.py, as on Streamlit Cloud
+
+
+@pytest.fixture(autouse=True)
+def fresh_pages_flag(monkeypatch):
+    # Streamlit decides once per process whether the app has a pages/ folder.
+    # The clock tests run a copy of the app from a folder without one, so let
+    # every test decide afresh.
+    monkeypatch.setattr(PagesManager, "uses_pages_directory", None)
 
 
 @pytest.fixture
@@ -61,10 +74,29 @@ def open_app(db, phone):
             at.secrets["supabase_url"] = "https://example.supabase.co"
             at.secrets["supabase_key"] = "test-key"
         if employees is not None:
-            at.secrets["employees"] = employees
+            db.set_staff(employees)
         if user is not None:
             at.query_params["user"] = user
         at.run()
         assert not at.exception, at.exception
         return at
     return open_app
+
+
+@pytest.fixture
+def open_manager(db):
+    """Opens /mngr in a new browser session and logs in with `password`
+    (None: don't log in). configured=False: no manager_password in Secrets."""
+    def open_manager(password=MANAGER_PASSWORD, *, configured=True):
+        at = AppTest.from_file(str(APP_FILE), default_timeout=30)
+        at.secrets["supabase_url"] = "https://example.supabase.co"
+        at.secrets["supabase_key"] = "test-key"
+        if configured:
+            at.secrets["manager_password"] = MANAGER_PASSWORD
+        at.switch_page("pages/mngr.py").run()
+        if password is not None:
+            at.text_input[0].input(password)
+            button(at, "Open").click().run()
+        assert not at.exception, at.exception
+        return at
+    return open_manager

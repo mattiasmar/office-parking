@@ -36,7 +36,7 @@ def test_name_not_on_the_staff_list_is_ignored(open_app):
     assert button_labels(at) == []
 
 
-def test_admin_sets_the_staff_list_in_secrets(open_app):
+def test_picker_shows_the_managers_staff_list(open_app):
     at = open_app(employees=["Zohar", "Yael"])
     assert at.selectbox[0].options == ["Zohar", "Yael"]
 

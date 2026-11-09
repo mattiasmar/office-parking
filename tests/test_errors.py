@@ -32,5 +32,14 @@ def test_failed_undo_asks_me_to_try_again(open_app, db):
 def test_missing_setup_explains_what_is_missing(open_app):
     at = open_app("Avi", secrets=False)
     (help_text,) = [m for m in messages(at) if "parking database" in m]
-    for needed in ("supabase_url", "supabase_key", "supabase_setup.sql"):
+    for needed in ("supabase_url", "supabase_key", "supabase_setup.sql", "supabase_employees.sql"):
         assert needed in help_text
+
+
+def test_missing_staff_table_is_explained(open_app, open_manager, db):
+    db.settings_table = False
+    at = open_app("Avi")
+    assert any("supabase_employees.sql" in m for m in messages(at))
+    assert not at.selectbox and button_labels(at) == []
+    assert ("Can't load the staff list. Check that supabase_employees.sql was run in Supabase."
+            in messages(open_manager()))

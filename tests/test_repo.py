@@ -6,9 +6,10 @@ import subprocess
 
 import yaml
 
-from support import APP_FILE, ROOT, WORKFLOW_FILE
+from support import APP_FILE, ROOT, STORE_FILE, WORKFLOW_FILE
 
 APP = APP_FILE.read_text()
+STORE = STORE_FILE.read_text()
 
 
 def tracked_files():
@@ -24,6 +25,18 @@ def workflow():
 
 def wake_step(name):
     return next(s for s in workflow()["jobs"]["wake"]["steps"] if s.get("name") == name)
+
+
+def runs(job, event, schedule=""):
+    """Whether `job` runs for this event (and, for schedules, this cron)."""
+    condition = workflow()["jobs"][job].get("if", "true")
+    expr = (condition.replace("||", " or ").replace("&&", " and ")
+            .replace("github.event_name", "event").replace("github.event.schedule", "schedule"))
+    return eval(expr, {"__builtins__": {}}, {"event": event, "schedule": schedule, "true": True})
+
+
+def crons_for(job):
+    return [e["cron"] for e in workflow()["on"]["schedule"] if runs(job, "schedule", e["cron"])]
 
 
 def cron_hours(cron):
@@ -56,10 +69,16 @@ def test_secrets_file_is_not_committed():
 
 
 # ------------------------------------------------------ 9. ready every morning ---
-def test_app_is_checked_at_least_every_12_hours():
-    hours = sorted(h for entry in workflow()["on"]["schedule"] for h in cron_hours(entry["cron"]))
+def test_app_is_woken_at_least_every_12_hours():
+    hours = sorted(h for cron in crons_for("wake") for h in cron_hours(cron))
+    assert hours, "the wake job has no schedule"
     gaps = [(b - a) % 24 or 24 for a, b in zip(hours, hours[1:] + hours[:1])]
-    assert max(gaps) <= 12, f"checks at {hours} UTC leave a {max(gaps)} h gap"
+    assert max(gaps) <= 12, f"wake-ups at {hours} UTC leave a {max(gaps)} h gap"
+
+
+def test_app_is_woken_only_on_schedule_or_by_hand():
+    assert runs("wake", "workflow_dispatch")
+    assert not runs("wake", "pull_request") and not runs("wake", "push")
 
 
 def test_sleeping_app_is_woken():
@@ -96,8 +115,15 @@ def test_supabase_ping_reads_the_secrets_it_names():
 
 def test_setup_help_names_every_secret_the_app_needs():
     setup_help = re.search(r'SETUP_HELP = \((.*?)\)\n', APP, re.S).group(1)
-    for key in re.findall(r'st\.secrets\["(\w+)"\]', APP):
+    needed = re.findall(r'st\.secrets\["(\w+)"\]', APP + STORE)
+    assert needed
+    for key in needed:
         assert key in setup_help
+
+
+def test_manager_page_is_not_in_the_page_menu():
+    config = (ROOT / ".streamlit" / "config.toml").read_text()
+    assert re.search(r"^\[client\][^\[]*^showSidebarNavigation\s*=\s*false\b", config, re.M | re.S)
 
 
 def test_test_tools_stay_out_of_the_app_install_list():
@@ -106,9 +132,18 @@ def test_test_tools_stay_out_of_the_app_install_list():
     assert not packages & {"pytest", "pyyaml"}
 
 
-def test_tests_run_on_every_change_and_on_schedule():
+def test_tests_run_once_a_night_and_on_every_change():
     wf = workflow()
-    assert {"pull_request", "push", "schedule"} <= wf["on"].keys()
-    runs = [s.get("run", "") for s in wf["jobs"]["test"]["steps"]]
-    assert "pytest tests" in runs and "node --test tests/geolocation.test.js" in runs
-    assert "schedule" in wf["jobs"]["wake"]["if"] and "pull_request" not in wf["jobs"]["wake"]["if"]
+    (cron,) = crons_for("test")
+    (hour,) = cron_hours(cron)
+    assert all((hour + offset) % 24 < 6 for offset in (2, 3)), f"{cron!r} isn't at night in Israel"
+    assert {"pull_request", "push"} <= wf["on"].keys()
+    assert all(runs("test", event) for event in ("pull_request", "push", "workflow_dispatch"))
+    steps = [s.get("run", "") for s in wf["jobs"]["test"]["steps"]]
+    assert "pytest tests" in steps and "node --test tests/geolocation.test.js" in steps
+
+
+def test_every_schedule_runs_a_job():
+    for entry in workflow()["on"]["schedule"]:
+        assert any(runs(job, "schedule", entry["cron"]) for job in workflow()["jobs"]), (
+            f"no job's 'if' names the schedule {entry['cron']!r}")
